@@ -1,1 +1,972 @@
+file is httprequestmethods.ts
 
+enum HttpRequestMethods {
+  GET = 'get',
+  HEAD = 'head',
+  POST = 'post',
+  PUT = 'put',
+  DELETE = 'delete',
+  OPTIONS = 'options',
+  PATCH = 'patch'
+}
+
+export default Object.freeze(HttpRequestMethods);
+----------------------------
+
+file is HttpResponseCodes.ts
+
+enum HttpResponseCodes {
+  ok = 200,
+  accepted = 202,
+  movedPermanently = 301,
+  badRequest = 400,
+  unauthorized = 401,
+  forbidden = 403,
+  notFound = 404,
+  methodNotAllowed = 405,
+  conflict = 409,
+  payloadTooLarge = 413,
+  tooManyAttempts = 429,
+  serverError = 500,
+  serviceUnavailable = 503
+}
+
+export default Object.freeze(HttpResponseCodes);
+--------------------
+file is httpService.ts
+
+import { AxiosPromise, AxiosResponse, CancelTokenSource } from 'axios';
+import httpClient from './httpClient';
+import HttpRequestMethods from './httpRequestMethods';
+import UrlConfig from '../interfaces/UrlConfig';
+import { buildConfigBoundAuthToken } from '../../../utilities/boundAuthTokens/http/boundAuthTokensHttpUtil';
+
+function buildCustomizedConfig(urlConfig: UrlConfig): UrlConfig {
+  const config = { ...urlConfig };
+  if (urlConfig.noCache) {
+    config.headers = {
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      Pragma: 'no-cache',
+      Expires: 0,
+      ...config.headers
+    };
+  }
+
+  if (urlConfig.noPragma && config.headers.Pragma) {
+    delete config.headers.Pragma; // this is for backward-compatible, Pragma is deprecated, will remove in the future.
+  }
+
+  if (urlConfig.authBearerToken) {
+    config.headers = {
+      ...config.headers,
+      'X-Auth-Bearer-Token': urlConfig.authBearerToken
+    };
+  }
+
+  return config;
+}
+
+function buildRequest(urlConfig: UrlConfig): AxiosPromise {
+  if (!urlConfig) {
+    Promise.reject(new Error('No config found'));
+  }
+
+  return buildConfigBoundAuthToken(urlConfig).then(newConfig => {
+    return httpClient(buildCustomizedConfig(newConfig));
+  });
+}
+
+function buildGetRequest(urlConfig: UrlConfig, params?: URLSearchParams | object): AxiosPromise {
+  return buildRequest({
+    method: HttpRequestMethods.GET,
+    url: urlConfig.url,
+    ...urlConfig,
+    params
+  });
+}
+
+function buildPostRequest(
+  urlConfig: UrlConfig,
+  data?: Document | BodyInit | object | null
+): AxiosPromise {
+  return buildRequest({
+    method: HttpRequestMethods.POST,
+    url: urlConfig.url,
+    ...urlConfig,
+    data
+  });
+}
+
+function buildPatchRequest(
+  urlConfig: UrlConfig,
+  data?: Document | BodyInit | object | null
+): AxiosPromise {
+  return buildRequest({
+    method: HttpRequestMethods.PATCH,
+    url: urlConfig.url,
+    ...urlConfig,
+    data
+  });
+}
+
+function buildPutRequest(urlConfig: UrlConfig, data?: Document | BodyInit | null): AxiosPromise {
+  return buildRequest({
+    method: HttpRequestMethods.PUT,
+    url: urlConfig.url,
+    ...urlConfig,
+    data
+  });
+}
+
+function buildDeleteRequest(urlConfig: UrlConfig, params?: URLSearchParams | object): AxiosPromise {
+  return buildRequest({
+    method: HttpRequestMethods.DELETE,
+    url: urlConfig.url,
+    ...urlConfig,
+    params
+  });
+}
+
+function buildBatchPromises(
+  arrayNeedsBatch: string[],
+  cutOff: number,
+  urlConfig: UrlConfig,
+  isPost: boolean,
+  paramsKey: string
+): Promise<AxiosResponse[]> {
+  const promises: AxiosPromise[] = [];
+  let startIndex = 0;
+  let subArray = arrayNeedsBatch.slice(startIndex, cutOff);
+  const key = paramsKey || 'userIds';
+  while (subArray.length > 0) {
+    const params: Record<string, string[]> = {};
+    params[key] = subArray;
+    if (isPost) {
+      promises.push(buildPostRequest(urlConfig, params));
+    } else {
+      promises.push(buildGetRequest(urlConfig, params));
+    }
+    startIndex += 1;
+    subArray = arrayNeedsBatch.slice(startIndex * cutOff, startIndex * cutOff + cutOff);
+  }
+  return Promise.all(promises);
+}
+
+function createCancelToken(): CancelTokenSource {
+  return httpClient.CancelToken.source();
+}
+
+function isCancelled(error: any): boolean {
+  return httpClient.isCancel(error);
+}
+
+/**
+ * Parses a JavaScript object, which can take on any type, into an array of
+ * error codes based on the typical schema returned by our back-end.
+ */
+const getApiErrorCodes = (error: unknown): number[] => {
+  const errorCodes: number[] = [];
+  if (!error || typeof error !== 'object') {
+    return [];
+  }
+
+  const { errors } = error as Record<string, unknown>;
+  if (!(errors instanceof Array)) {
+    return [];
+  }
+
+  errors.forEach((errorObject: unknown) => {
+    if (!errorObject || typeof errorObject !== 'object') {
+      return;
+    }
+
+    const { code } = errorObject as Record<string, unknown>;
+    if (typeof code === 'number') {
+      errorCodes.push(code);
+    }
+  });
+
+  return errorCodes;
+};
+
+/**
+ * Gets a single error code based on a JS object thrown by Axios.
+ */
+const parseErrorCode = (error: unknown): number | null => {
+  const errorCodes = getApiErrorCodes(error);
+  if (typeof error === 'object') {
+    // Sometimes the response returned by Axios hides the errors in `error.data`.
+    getApiErrorCodes((error as Record<string, unknown>).data).forEach(item =>
+      errorCodes.push(item)
+    );
+  }
+
+  return errorCodes[0] || null;
+};
+
+export default {
+  methods: HttpRequestMethods,
+  get: buildGetRequest,
+  post: buildPostRequest,
+  delete: buildDeleteRequest,
+  patch: buildPatchRequest,
+  put: buildPutRequest,
+  buildBatchPromises,
+  createCancelToken,
+  isCancelled,
+  getApiErrorCodes,
+  parseErrorCode
+};
+
+----------------------
+file is gamesdatastore.ts
+
+import { AxiosPromise } from 'axios';
+import * as GamesProvider from '../../providers/games/gamesProvider';
+import * as GamesV2Provider from '../../providers/gamesV2/gamesV2Provider';
+
+const gamesApiInstance = new GamesProvider.GamesApi();
+const gamesV2ApiInstance = new GamesV2Provider.GamesApi();
+const gamePassesApiInstance = new GamesProvider.GamePassesApi();
+
+const getUniverseMedia = (
+  universeId: number
+): AxiosPromise<GamesV2Provider.RobloxWebWebAPIModelsApiArrayResponseRobloxWebResponsesGamesGameMediaItemResponseV2> => {
+  return gamesV2ApiInstance.v2GamesUniverseIdMediaGet(universeId, { withCredentials: true });
+};
+
+const getPlayabilityStatus = (
+  universeIds: number[]
+): AxiosPromise<GamesProvider.RobloxGamesApiModelsResponsePlayabilityStatusResponse[]> => {
+  return gamesApiInstance.v1GamesMultigetPlayabilityStatusGet(universeIds, {
+    withCredentials: true
+  });
+};
+
+const getPlaceDetails = (
+  placeIds: number[]
+): AxiosPromise<GamesProvider.RobloxGamesApiModelsResponsePlaceDetails[]> => {
+  return gamesApiInstance.v1GamesMultigetPlaceDetailsGet(placeIds, { withCredentials: true });
+};
+
+const getProductInfo = (
+  universeIds: number[]
+): AxiosPromise<GamesProvider.RobloxWebWebAPIModelsApiArrayResponseRobloxGamesApiModelsResponseGameProductResponse> => {
+  return gamesApiInstance.v1GamesGamesProductInfoGet(universeIds, { withCredentials: true });
+};
+
+const getGameDetails = (
+  universeIds: number[]
+): AxiosPromise<GamesProvider.RobloxWebWebAPIModelsApiArrayResponseRobloxGamesApiModelsResponseGameDetailResponse> => {
+  return gamesApiInstance.v1GamesGet(universeIds, { withCredentials: true });
+};
+
+const getGamePasses = (
+  universeId: number,
+  sortOrder?: 'Asc' | 'Desc',
+  limit?: 10 | 25 | 50 | 100,
+  cursor?: string
+): AxiosPromise<GamesProvider.RobloxWebWebAPIModelsApiPageResponseRobloxGamesApiModelsResponseGamePassResponse> => {
+  return gamePassesApiInstance.v1GamesUniverseIdGamePassesGet(universeId, sortOrder, limit, cursor);
+};
+
+const getGamesSorts = (
+  modelGameSortsContext?:
+    | 'GamesDefaultSorts'
+    | 'GamesAllSorts'
+    | 'HomeSorts'
+    | 'ChatSorts'
+    | 'UnifiedHomeSorts'
+    | 'AbTestSorts'
+    | 'GamesPageAbTestSorts1'
+    | 'GamesPageAbTestSorts2'
+): AxiosPromise<GamesProvider.RobloxGamesApiModelsResponseGameSortsResponse> => {
+  return gamesApiInstance.v1GamesSortsGet(modelGameSortsContext);
+};
+
+const getGamesList = (
+  modelSortToken?: string,
+  modelGameFilter?: string,
+  modelTimeFilter?: string,
+  modelGenreFilter?: string,
+  modelExclusiveStartId?: number,
+  modelSortOrder?: number,
+  modelGameSetTargetId?: number,
+  modelKeyword?: string,
+  modelStartRows?: number,
+  modelMaxRows?: number,
+  modelIsKeywordSuggestionEnabled?: boolean,
+  modelContextCountryRegionId?: number,
+  modelContextUniverseId?: number,
+  modelPageId?: string,
+  modelSortPosition?: number,
+  options?: any
+): AxiosPromise<GamesProvider.RobloxGamesApiModelsResponseGamesSearchResponse> => {
+  return gamesApiInstance.v1GamesListGet(
+    modelSortToken,
+    modelGameFilter,
+    modelTimeFilter,
+    modelGenreFilter,
+    modelExclusiveStartId,
+    modelSortOrder,
+    modelGameSetTargetId,
+    modelKeyword,
+    modelStartRows,
+    modelMaxRows,
+    modelIsKeywordSuggestionEnabled,
+    modelContextCountryRegionId,
+    modelContextUniverseId,
+    modelPageId,
+    modelSortPosition,
+    options
+  );
+};
+
+export default {
+  getUniverseMedia,
+  getPlayabilityStatus,
+  getPlaceDetails,
+  getProductInfo,
+  getGameDetails,
+  getGamePasses,
+  getGamesSorts,
+  getGamesList
+};
+----------------------------
+This file name is userbatchrequestprocessor
+
+import httpService from '../../../http/implementations/httpService';
+import { BatchRequestFactory } from '../../../services/batchRequestService/batchRequestFactory';
+import {
+  getUsersUrl,
+  DefaultUserBatchSize,
+  DefaultUserProcessBatchWaitTime,
+  UserObject,
+  UserQueueItem
+} from './userDataConstants';
+
+const batchRequestFactory = new BatchRequestFactory<UserQueueItem, UserObject>();
+
+const userBatchRequestProcessor = batchRequestFactory.createRequestProcessor(
+  items => {
+    const urlConfig = {
+      url: getUsersUrl(),
+      retryable: true,
+      withCredentials: true
+    };
+    const userIds = items.map(({ data: { userId } }) => userId);
+    return httpService
+      .post(urlConfig, { userIds, excludeBannedUsers: true })
+      .then(({ data: { data: users } }) => {
+        const results: { [key: number]: UserObject } = {};
+        users.forEach((user: UserObject) => {
+          results[user.id] = user;
+        });
+        return results;
+      });
+  },
+  ({ userId }: UserQueueItem) => userId?.toString(),
+  {
+    batchSize: DefaultUserBatchSize,
+    processBatchWaitTime: DefaultUserProcessBatchWaitTime
+  }
+);
+
+export default userBatchRequestProcessor;
+------------------
+This file is userdatastore.ts
+
+import {
+  BatchRequestProcessor,
+  BatchItemProcessor,
+  BatchIdSerializer,
+  QueueItem,
+  BatchRequestError
+} from 'core-utilities';
+import { BatchRequestFactory } from '../../../services/batchRequestService/batchRequestFactory';
+import { httpService } from '../../../http/http';
+import { CacheProperties } from '../../../services/batchRequestService/batchRequestConstants';
+import {
+  populateFriendsData,
+  populatePresenceData,
+  getFriendsUrlConfig,
+  getPresenceUrlConfig,
+  getFriendsParams
+} from './userStoreUtil';
+
+import {
+  UserDataRequest,
+  FriendsRes,
+  FriendResult,
+  MethodType,
+  PresenceObject,
+  UserQueueItem,
+  MaxFriendRequestNotificationCount,
+  MaxMessagesNotificationCount,
+  FriendsUserSortType
+} from './userDataConstants';
+import userBatchRequestProcessor from './userBatchRequestProcessor';
+
+const batchRequestFactory = new BatchRequestFactory<UserDataRequest, FriendResult>();
+
+const processors: Map<string, BatchRequestProcessor<UserDataRequest, FriendResult>> = new Map<
+  string,
+  BatchRequestProcessor<UserDataRequest, FriendResult>
+>();
+
+const getIdSerializer = (
+  methodName: MethodType,
+  { userId, cursor, sortOrder, userSort, limit }: UserDataRequest
+) => `${methodName}:${userId}:${cursor}:${sortOrder}:${userSort}:${limit}`;
+
+const getUserDataRequestProcessor = (
+  methodName: string,
+  itemProcessor: BatchItemProcessor<UserDataRequest>,
+  idSerializer: BatchIdSerializer<UserDataRequest>
+) => {
+  if (processors.has(methodName)) return processors.get(methodName);
+  const processor = batchRequestFactory.createRequestProcessor(itemProcessor, idSerializer, {
+    batchSize: 1
+  });
+  processors.set(methodName, processor);
+  return processor;
+};
+
+const getItemProcessor = (methodName: MethodType) => {
+  return ([{ key, data: userDataRequest }]: QueueItem<UserDataRequest>[]) => {
+    const { userId, isGuest } = userDataRequest;
+    const urlConfig = getFriendsUrlConfig(methodName, userId);
+    const params = getFriendsParams(userDataRequest);
+
+    return httpService
+      .get(urlConfig, params)
+      .then((friendsRes: FriendsRes) => {
+        const results: { [key: string]: FriendResult } = {};
+        if (!friendsRes?.data) {
+          results[key] = { userData: [] };
+          return results;
+        }
+
+        const {
+          data: { data: userData, previousPageCursor: prevCursor, nextPageCursor: nextCursor }
+        } = friendsRes;
+        const friendsData = populateFriendsData(userData);
+
+        if (isGuest) {
+          results[key] = { userData, prevCursor, nextCursor };
+          return results;
+        }
+
+        const presenceUrlConfig = getPresenceUrlConfig();
+
+        const userIds = Object.keys(friendsData).map(id => parseInt(id, 10));
+        return httpService
+          .post(presenceUrlConfig, { userIds })
+          .then((presenceData: PresenceObject) => {
+            populatePresenceData(friendsData, presenceData);
+            results[key] = { userData, prevCursor, nextCursor };
+            return results;
+          })
+          .catch((error: BatchRequestError) => {
+            // do not retry presence call if failed
+            console.debug(error);
+            results[key] = { userData, prevCursor, nextCursor };
+            return results;
+          });
+      })
+      .catch((error: BatchRequestError) => {
+        // request will be retried if not successful
+        console.debug(error);
+        return {};
+      });
+  };
+};
+
+const generateUserDataStoreMethod = (methodName: MethodType) => {
+  const userDataProcessor = getUserDataRequestProcessor(
+    methodName,
+    getItemProcessor(methodName),
+    ({ userId }: UserDataRequest) => userId?.toString()
+  );
+
+  return (userDataRequest: UserDataRequest, cacheProperties?: CacheProperties) => {
+    const requestKey = getIdSerializer(methodName, userDataRequest);
+
+    if (cacheProperties?.refreshCache) {
+      userDataProcessor.invalidateItem(userDataRequest, requestKey);
+    }
+    return userDataProcessor.queueItem(userDataRequest, requestKey, cacheProperties);
+  };
+};
+
+const clearUserDataStoreCache = () => {
+  processors.forEach((processor: BatchRequestProcessor<UserQueueItem, FriendResult>) => {
+    processor.clearCache();
+  });
+};
+
+// @ts-ignore
+// eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+export default window.CoreRobloxUtilities?.dataStores?.userDataStoreV2 || {
+  getFriends: generateUserDataStoreMethod(MethodType.Friends),
+  getFollowers: generateUserDataStoreMethod(MethodType.Followers),
+  getFollowings: generateUserDataStoreMethod(MethodType.Followings),
+  getFriendsRequests: generateUserDataStoreMethod(MethodType.Requests),
+  getUser: (userId: number) => userBatchRequestProcessor.queueItem({ userId }),
+  clearUserDataStoreCache,
+  maxFriendRequestNotificationCount: MaxFriendRequestNotificationCount,
+  maxMessagesNotificationCount: MaxMessagesNotificationCount,
+  FriendsUserSortType
+};
+------------
+This file is userstoreutil.ts
+
+import {
+  getFriendsApiUrl,
+  getFriendsRequestUrl,
+  getUserPresenceUrl,
+  UserDataRequest,
+  PresenceObject,
+  FriendObject,
+  FriendsData,
+  MethodType,
+  UserPresence
+} from './userDataConstants';
+
+export const populateFriendsData = (friends: Array<FriendObject>) => {
+  const friendsData: FriendsData = {};
+  friends.forEach(friend => {
+    friendsData[friend.id] = friend;
+    friendsData[friend.id].profileUrl = `/users/${friend.id}/profile`;
+    friendsData[friend.id].presence = {};
+  });
+  return friendsData;
+};
+
+export const populatePresenceData = (friendsData: FriendsData, presenceData: PresenceObject) => {
+  if (presenceData?.data?.userPresences?.length > 0) {
+    const {
+      data: { userPresences }
+    } = presenceData;
+
+    const presences = [...userPresences];
+    presences.forEach((userPresence: UserPresence) => {
+      friendsData[userPresence.userId].presence = userPresence;
+    });
+  }
+  return friendsData;
+};
+
+export const getFriendsUrlConfig = (methodName: MethodType, userId: number) => {
+  let url = getFriendsApiUrl(userId, methodName);
+  if (methodName === MethodType.Requests) {
+    url = getFriendsRequestUrl();
+  }
+  return {
+    url,
+    retryable: true,
+    withCredentials: true
+  };
+};
+
+export const getFriendsParams = ({
+  cursor,
+  sortOrder,
+  userSort,
+  limit,
+  fetchMutualFriends
+}: UserDataRequest) => {
+  const params = {};
+  if (cursor) {
+    Object.assign(params, { cursor });
+  }
+  if (sortOrder) {
+    Object.assign(params, { sortOrder });
+  }
+  if (userSort) {
+    Object.assign(params, { userSort });
+  }
+  if (limit) {
+    Object.assign(params, { limit });
+  }
+  if (fetchMutualFriends) {
+    Object.assign(params, { fetchMutualFriends });
+  }
+  return params;
+};
+
+export const getPresenceUrlConfig = () => {
+  return {
+    url: getUserPresenceUrl(),
+    retryable: false,
+    withCredentials: true
+  };
+};
+---------------
+This file is localeDataStore.js
+
+import { AxiosPromise } from 'axios';
+import localStorageService from '../../../services/localStorageService/localStorageService';
+import 
+    * as
+    LocaleProvider
+ from '../../providers/locale/localeProvider';
+
+const localeApiInstance = new LocaleProvider.LocaleApi();
+
+const enum localeStorageCacheKeys {
+    getLocales = 'Roblox.Api.Locales.getLocales'
+};
+
+const getLocales = (): AxiosPromise<LocaleProvider.ApiArrayResponseSupportedLocaleLocus> => {
+    return localeApiInstance.v1LocalesGet({ withCredentials: true });
+};
+
+const getUserLocale = (): AxiosPromise<LocaleProvider.UserLocalizationLocusLocalesResponse> => {
+    return localeApiInstance.v1LocalesUserLocalizationLocusSupportedLocalesGet({ withCredentials: true });
+}
+
+const setUserLocale = (localeCode: string): AxiosPromise<LocaleProvider.SuccessResponse> => {
+    const payload: LocaleProvider.SetSupportedLocaleForUserRequest = {
+        supportedLocaleCode: localeCode
+    };
+    return localeApiInstance.v1LocalesSetUserSupportedLocalePost(payload, { withCredentials: true });
+};
+
+const requestDataFromCacheOrNetwork = (networkCaller: Function, localeStorageKey: string, cacheDurationInMs: number) => {
+    return new Promise((resolve, reject) => {
+        const localStorageData = localStorageService.fetchNonExpiredCachedData(localeStorageKey, cacheDurationInMs);
+        if(!localStorageData){
+            networkCaller().then((response: any) => {
+                localStorageService.saveDataByTimeStamp(localeStorageKey, response.data);
+                resolve(response.data);
+            }, (error: Error) => reject(error));
+        } else {
+            resolve(localStorageData.data);
+        }
+    });
+}
+
+const getLocalesWithCache = (cacheDurationInMs: number) => {
+    return requestDataFromCacheOrNetwork(getLocales, localeStorageCacheKeys.getLocales, cacheDurationInMs);
+};
+
+export default {
+    getLocales,
+    getUserLocale,
+    setUserLocale,
+    getLocalesWithCache
+};
+------------
+this file is somename.js
+
+
+            var Roblox = Roblox || {};
+
+Roblox.BundleDetector = (function () {
+    var isMetricsApiEnabled = Roblox.BundleVerifierConstants && Roblox.BundleVerifierConstants.isMetricsApiEnabled;
+
+    var loadStates = {
+        loadSuccess: "loadSuccess",
+        loadFailure: "loadFailure",
+        executionFailure: "executionFailure"
+    };
+
+    var bundleContentTypes = {
+        javascript: "javascript",
+        css: "css"
+    };
+
+    var ephemeralCounterNames = {
+        cdnPrefix: "CDNBundleError_",
+        unknown: "CDNBundleError_unknown",
+        cssError: "CssBundleError",
+        jsError: "JavascriptBundleError",
+        jsFileError: "JsFileExecutionError",
+        resourceError: "ResourcePerformance_Error",
+        resourceLoaded: "ResourcePerformance_Loaded"
+    };
+
+    return {
+        jsBundlesLoaded: {},
+        bundlesReported: {},
+
+        counterNames: ephemeralCounterNames,
+        loadStates: loadStates,
+        bundleContentTypes: bundleContentTypes,
+
+        timing: undefined,
+
+        setTiming: function (windowTiming) {
+            this.timing = windowTiming;
+        },
+
+        getLoadTime: function () {
+            if (this.timing && this.timing.domComplete) {
+                return this.getCurrentTime() - this.timing.domComplete;
+            }
+        },
+
+        getCurrentTime: function () {
+            return new Date().getTime();
+        },
+
+        getCdnProviderName: function (bundleUrl, callBack) {
+            if (Roblox.BundleVerifierConstants.cdnLoggingEnabled) {
+                var xhr = new XMLHttpRequest();
+                xhr.open('GET', bundleUrl, true);
+
+                xhr.onreadystatechange = function () {
+                    if (xhr.readyState === xhr.HEADERS_RECEIVED) {
+                        try {
+                            var headerValue = xhr.getResponseHeader("rbx-cdn-provider");
+                            if (headerValue) {
+                                callBack(headerValue);
+                            } else {
+                                callBack();
+                            }
+                        } catch (e) {
+                            callBack();
+                        }
+                    }
+                };
+
+                xhr.onerror = function () {
+                    callBack();
+                };
+
+                xhr.send();
+            } else {
+                callBack();
+            }
+        },
+
+        getCdnProviderAndReportMetrics: function (bundleUrl, bundleName, loadState, bundleContentType) {
+            this.getCdnProviderName(bundleUrl, function (cdnProviderName) {
+                Roblox.BundleDetector.reportMetrics(bundleUrl, bundleName, loadState, bundleContentType, cdnProviderName);
+            });
+        },
+
+        reportMetrics: function (bundleUrl, bundleName, loadState, bundleContentType, cdnProviderName) {
+            if (!isMetricsApiEnabled
+                || !bundleUrl
+                || !loadState
+                || !loadStates.hasOwnProperty(loadState)
+                || !bundleContentType
+                || !bundleContentTypes.hasOwnProperty(bundleContentType)) {
+                return;
+            }
+
+            var xhr = new XMLHttpRequest();
+            var metricsApiUrl = (Roblox.EnvironmentUrls && Roblox.EnvironmentUrls.metricsApi) || "https://metrics.roblox.com";
+
+            xhr.open("POST", metricsApiUrl + "/v1/bundle-metrics/report", true);
+            xhr.setRequestHeader("Content-Type", "application/json");
+            xhr.withCredentials = true;
+            xhr.send(JSON.stringify({
+                bundleUrl: bundleUrl,
+                bundleName: bundleName || "",
+                bundleContentType: bundleContentType,
+                loadState: loadState,
+                cdnProviderName: cdnProviderName,
+                loadTimeInMilliseconds: this.getLoadTime() || 0
+            }));
+        },
+
+        logToEphemeralStatistics: function (sequenceName, value) {
+            var deviceType = Roblox.BundleVerifierConstants.deviceType;
+            sequenceName += "_" + deviceType;
+
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/game/report-stats?name=' + sequenceName + "&value=" + value, true);
+            xhr.withCredentials = true;
+            xhr.send();
+        },
+
+        logToEphemeralCounter: function (ephemeralCounterName) {
+            var deviceType = Roblox.BundleVerifierConstants.deviceType;
+            ephemeralCounterName += "_" + deviceType;
+            //log to ephemeral counters - taken from ET.js
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/game/report-event?name=' + ephemeralCounterName, true);
+            xhr.withCredentials = true;
+            xhr.send();
+        },
+
+      logToEventStream: function (failedBundle, ctx, cdnProvider, status) {
+            var urlUnencoded = window.location.href;
+            if (Roblox.Endpoints && Roblox.Endpoints.supportLocalizedUrls) {
+                // Remove urlLocale from event stream to prevent breaking change
+                urlUnencoded = Roblox.Endpoints.removeUrlLocale(urlUnencoded);
+            }
+
+            var esUrl = Roblox.BundleVerifierConstants.eventStreamUrl,
+              currentPageUrl = encodeURIComponent(urlUnencoded);
+
+            var deviceType = Roblox.BundleVerifierConstants.deviceType;
+            ctx += "_" + deviceType;
+            //try and grab performance data.
+            //Note that this is the performance of the xmlhttprequest rather than the original resource load.
+            var duration = 0;
+            if (window.performance) {
+                var perfTiming = window.performance.getEntriesByName(failedBundle);
+                if (perfTiming.length > 0) {
+                    var data = perfTiming[0];
+                    duration = data.duration || 0;
+                }
+            }
+            //log to event stream (diagnostic)
+            var params = "&evt=webBundleError&url=" + currentPageUrl +
+                "&ctx=" + ctx + "&fileSourceUrl=" + encodeURIComponent(failedBundle) +
+                "&cdnName=" + (cdnProvider || "unknown") +
+                "&statusCode=" + (status || "unknown") +
+                "&loadDuration=" + Math.floor(duration);
+            var img = new Image();
+            img.src = esUrl + params;
+        },
+
+        getCdnInfo: function (failedBundle, ctx, fileType) {
+            if (Roblox.BundleVerifierConstants.cdnLoggingEnabled) {
+                var xhr = new XMLHttpRequest();
+                var counter = this.counterNames;
+                xhr.open('GET', failedBundle, true);
+                var cdnProvider;
+
+                //succesful request
+                xhr.onreadystatechange = function () {
+                    if (xhr.readyState === xhr.HEADERS_RECEIVED) {
+                        cdnProvider = xhr.getResponseHeader("rbx-cdn-provider");
+                        if (cdnProvider && cdnProvider.length > 0) {
+                            Roblox.BundleDetector.logToEphemeralCounter(counter.cdnPrefix + cdnProvider + "_" + fileType);
+                        }
+                        else {
+                            Roblox.BundleDetector.logToEphemeralCounter(counter.unknown + "_" + fileType);
+                        }
+                    }
+                    else if (xhr.readyState === xhr.DONE) {
+                        // append status to cdn provider so we know its not related to network error. 
+                        Roblox.BundleDetector.logToEventStream(failedBundle, ctx, cdnProvider, xhr.status);
+                    }
+                };
+
+                //attach to possible things that can go wrong with the request.
+                //additionally a network error will trigger this callback
+                xhr.onerror = function () {
+                    Roblox.BundleDetector.logToEphemeralCounter(counter.unknown + "_" + fileType);
+                    Roblox.BundleDetector.logToEventStream(failedBundle, ctx, counter.unknown);
+                };
+
+                xhr.send();
+            }
+            else {
+                this.logToEventStream(failedBundle, ctx);
+            }
+        },
+
+        reportResourceError: function (resourceName) {
+            var ephemeralCounterName = this.counterNames.resourceError + "_" + resourceName;
+            this.logToEphemeralCounter(ephemeralCounterName);
+        },
+
+        reportResourceLoaded: function (resourceName) {
+            var loadTimeInMs = this.getLoadTime();
+            if (loadTimeInMs) {
+                var sequenceName = this.counterNames.resourceLoaded + "_" + resourceName;
+                this.logToEphemeralStatistics(sequenceName, loadTimeInMs);
+            }
+        },
+
+        reportBundleError: function (bundleTag) {
+            var ephemeralCounterName, failedBundle, ctx, contentType;
+            if (bundleTag.rel && bundleTag.rel === "stylesheet") {
+                ephemeralCounterName = this.counterNames.cssError;
+                failedBundle = bundleTag.href;
+                ctx = "css";
+                contentType = bundleContentTypes.css;
+            } else {
+                ephemeralCounterName = this.counterNames.jsError;
+                failedBundle = bundleTag.src;
+                ctx = "js";
+                contentType = bundleContentTypes.javascript;
+            }
+
+            //mark that we logged this bundle
+            this.bundlesReported[failedBundle] = true;
+
+            //e.g. javascriptBundleError_Computer
+            this.logToEphemeralCounter(ephemeralCounterName);
+            //this will also log to event stream
+            this.getCdnInfo(failedBundle, ctx, ctx);
+
+            var bundleName;
+            if (bundleTag.dataset) {
+                bundleName = bundleTag.dataset.bundlename;
+            }
+            else {
+                bundleName = bundleTag.getAttribute('data-bundlename');
+            }
+
+            this.getCdnProviderAndReportMetrics(failedBundle, bundleName, loadStates.loadFailure, contentType);
+        },
+
+        bundleDetected: function (bundleName) {
+            this.jsBundlesLoaded[bundleName] = true;
+        },
+
+        verifyBundles: function (document) {
+            var ephemeralCounterName = this.counterNames.jsFileError,
+                eventContext = ephemeralCounterName;
+            //grab all roblox script tags in the page. 
+            var scripts = (document && document.scripts) || window.document.scripts;
+            var errorsList = [];
+            var bundleName;
+            var monitor;
+            for (var i = 0; i < scripts.length; i++) {
+                var item = scripts[i];
+
+                if (item.dataset) {
+                    bundleName = item.dataset.bundlename;
+                    monitor = item.dataset.monitor;
+                }
+                else {
+                    bundleName = item.getAttribute('data-bundlename');
+                    monitor = item.getAttribute('data-monitor');
+                }
+
+                if (item.src && monitor && bundleName) {
+                    if (!Roblox.BundleDetector.jsBundlesLoaded.hasOwnProperty(bundleName)) {
+                        errorsList.push(item);
+                    }
+                }
+            }
+            if (errorsList.length > 0) {
+                for (var j = 0; j < errorsList.length; j++) {
+                    var script = errorsList[j];
+                    if (!this.bundlesReported[script.src]) {
+                        //log the counter only if the file is actually corrupted, not just due to failure to load
+                        //e.g. JsFileExecutionError_Computer
+                        this.logToEphemeralCounter(ephemeralCounterName);
+                        this.getCdnInfo(script.src, eventContext, 'js');
+
+                        if (script.dataset) {
+                            bundleName = script.dataset.bundlename;
+                        }
+                        else {
+                            bundleName = script.getAttribute('data-bundlename');
+                        }
+
+                        this.getCdnProviderAndReportMetrics(script.src, bundleName, loadStates.executionFailure, bundleContentTypes.javascript);
+                    }
+                }
+            }
+        }
+    };
+})();
+
+window.addEventListener("load", function (evt) {
+    Roblox.BundleDetector.verifyBundles();
+});
+
+Roblox.BundleDetector.setTiming(window.performance.timing);
+            //# sourceURL=somename.js
+        
